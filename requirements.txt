@@ -3,5 +3,9 @@ uvicorn[standard]>=0.29
 python-multipart>=0.0.9
 pandas>=2.0
 openpyxl>=3.1
-# Heavy document conversion (pulls in torch + models). Pin before deploying.
-docling>=2.7,<3
+tabulate>=0.9
+# Heavy document conversion (pulls in torch + models). Pinned for reproducible
+# builds (resolved via `docker run --rm <img> pip freeze`).
+docling==2.115.0
+torch==2.13.0
+torchvision==0.28.0
