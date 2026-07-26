@@ -49,9 +49,36 @@ def _jsonable(obj: Any) -> Any:
     return str(obj)
 
 
-def analyze_excel(data: bytes, filename: str) -> dict:
-    """Native spreadsheet analysis: per sheet, per column dtype/null/unique + numeric
-    stats or top categorical values, plus a small sample. Richer than Markdown."""
+def serialize_excel(data: bytes) -> list[dict]:
+    """Row-wise table serialization (the tri-server 'descriptive' format that beats
+    Markdown for tabular extraction): one line per row,
+        R{row}| {col}:{value} || {col}:{value} || ...
+    with 0-based row/col indices, empty cells omitted, raw values, error states
+    (#VALUE! …) preserved verbatim, in-cell newlines as a literal \\n."""
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+    sheets = []
+    for ws in wb.worksheets:
+        lines = []
+        for r, row in enumerate(ws.iter_rows()):
+            parts = []
+            for cell in row:
+                v = cell.value
+                if v is None or v == "":
+                    continue
+                col = cell.column - 1  # 0-based
+                sval = str(v).replace("\r\n", "\n").replace("\n", "\\n")
+                parts.append(f"{col}:{sval}")
+            if parts:
+                lines.append(f"R{r}| " + " || ".join(parts))
+        sheets.append({"name": ws.title, "serialized": "\n".join(lines)})
+    return sheets
+
+
+def analyze_excel_stats(data: bytes) -> list[dict]:
+    """Per-sheet, per-column dtype/null/unique + numeric stats or top categories +
+    a small sample. A compact statistical description on top of the raw formats."""
     import pandas as pd
 
     xls = pd.ExcelFile(io.BytesIO(data))
@@ -69,12 +96,7 @@ def analyze_excel(data: bytes, filename: str) -> dict:
                 "unique": int(s.nunique(dropna=True)),
             }
             if pd.api.types.is_numeric_dtype(s) and s.notna().any():
-                col["stats"] = {
-                    "min": _num(s.min()),
-                    "max": _num(s.max()),
-                    "mean": _num(s.mean()),
-                    "sum": _num(s.sum()),
-                }
+                col["stats"] = {"min": _num(s.min()), "max": _num(s.max()), "mean": _num(s.mean()), "sum": _num(s.sum())}
             else:
                 top = s.dropna().astype(str).value_counts().head(3)
                 col["top"] = [{"value": str(k), "count": int(v)} for k, v in top.items()]
@@ -82,15 +104,50 @@ def analyze_excel(data: bytes, filename: str) -> dict:
         head = df.head(5)
         sample = _jsonable(head.astype(object).where(pd.notna(head), None).to_dict(orient="records"))
         sheets.append({"name": str(name), "rows": int(len(df)), "columns": columns, "sample": sample})
-    return {"filename": filename, "sheets": sheets}
+    return sheets
+
+
+def excel_markdown(data: bytes) -> str:
+    """Each sheet as a Markdown table (under a '## Blatt: <name>' heading)."""
+    import pandas as pd
+
+    xls = pd.ExcelFile(io.BytesIO(data))
+    blocks = []
+    for name in xls.sheet_names:
+        df = xls.parse(name)
+        try:
+            table = df.to_markdown(index=False)
+        except Exception:
+            table = df.to_csv(index=False)
+        blocks.append(f"## Blatt: {name}\n\n{table}")
+    return "\n\n".join(blocks)
+
+
+def convert_excel(data: bytes, filename: str) -> dict:
+    """Spreadsheet → both a Markdown rendering AND the descriptive row-wise
+    serialization, plus a compact statistical analysis."""
+    return {
+        "filename": filename,
+        "markdown": excel_markdown(data),
+        "serialized": serialize_excel(data),
+        "analysis": analyze_excel_stats(data),
+    }
 
 
 def to_markdown(data: bytes, filename: str) -> str:
-    """Convert a document to Markdown with Docling (lazy import — heavy stack)."""
-    from docling.document_converter import DocumentConverter
-    from docling.datamodel.base_models import DocumentStream
+    """Convert a document to Markdown with Docling (lazy import — heavy stack).
 
-    converter = DocumentConverter()
+    OCR is disabled: we target digital (text-layer) documents, which avoids
+    pulling the OCR model stack (RapidOCR) at runtime and keeps memory low.
+    Scanned-PDF OCR is a later opt-in (set do_ocr=True + bake the OCR model)."""
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+    from docling.datamodel.base_models import DocumentStream, InputFormat
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
+
+    pipeline_options = PdfPipelineOptions(do_ocr=False)
+    converter = DocumentConverter(
+        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
+    )
     source = DocumentStream(name=filename, stream=io.BytesIO(data))
     result = converter.convert(source)
     return result.document.export_to_markdown()

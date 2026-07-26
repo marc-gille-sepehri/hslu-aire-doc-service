@@ -1,0 +1,26 @@
+version: 0.2
+
+# Native amd64 build of the doc-service image, run inside AWS CodeBuild and
+# pushed to ECR over the AWS-internal network. This exists because building
+# amd64 under QEMU on an Apple-Silicon Mac deadlocks (model prefetch) and
+# uploading the ~4 GB Torch layer from a home connection is unreliable.
+
+env:
+  variables:
+    ECR: "302174038010.dkr.ecr.eu-central-1.amazonaws.com"
+    REPO: "hslu-aire-doc-service"
+
+phases:
+  pre_build:
+    commands:
+      - echo "Logging in to ECR..."
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR"
+  build:
+    commands:
+      - echo "Building image (Dockerfile.amd64)..."
+      - docker build -f Dockerfile.amd64 -t "$ECR/$REPO:latest" .
+  post_build:
+    commands:
+      - echo "Pushing to ECR..."
+      - docker push "$ECR/$REPO:latest"
+      - echo "Done."

@@ -6,7 +6,7 @@ import os
 
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 
-from .convert import EXCEL_EXTS, analyze_excel, ext_of, to_markdown
+from .convert import EXCEL_EXTS, convert_excel, ext_of, to_markdown
 
 app = FastAPI(title="hslu-aire-doc-service", version="0.1.0")
 
@@ -35,7 +35,7 @@ async def convert(file: UploadFile = File(...), authorization: str = Header(defa
     ext = ext_of(name)
     try:
         if ext in EXCEL_EXTS:
-            return {"kind": "excel", "filename": name, "excel": analyze_excel(data, name)}
+            return {"kind": "excel", "filename": name, "excel": convert_excel(data, name)}
         markdown = to_markdown(data, name)
         return {"kind": "markdown", "filename": name, "markdown": markdown}
     except HTTPException:

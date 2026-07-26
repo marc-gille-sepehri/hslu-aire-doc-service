@@ -1,0 +1,32 @@
+# amd64 build variant WITHOUT the model-prefetch RUN step.
+# Rationale: prefetching Docling models runs Torch under QEMU emulation on an
+# Apple-Silicon host and deadlocks. Here we skip baking; Docling downloads the
+# models on the first /convert request at runtime (native amd64 on App Runner —
+# a one-time delay on the first conversion, then cached for the instance life).
+# The repo's main Dockerfile keeps the baked-models design for native amd64 builds.
+FROM python:3.12-slim
+
+# No DOCLING_ARTIFACTS_PATH here: that would force Docling to use only
+# pre-baked artifacts and refuse to download. We skip baking in this emulated
+# build, so Docling downloads the layout/table models at runtime into HF_HOME.
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HOME=/models
+
+WORKDIR /app
+
+# System libs Torch / Docling need at runtime.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+# /models is created/populated lazily at runtime (no build-time prefetch).
+RUN mkdir -p /models
+
+COPY app ./app
+
+EXPOSE 8080
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
