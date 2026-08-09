@@ -247,10 +247,15 @@ a finding, not noise.
 
 ## 5. UI
 
+> **Smaller than this section assumed.** The `DocConvert` widget already had a three-tab layout
+> — *Markdown / Serialisiert / Analyse* — where the middle tab rendered the **old** 0-based
+> format from `excel.serialized`. There was no new pane to build: the work was pointing that
+> tab at `excel.cells` and making the tab list depend on `outputFormat`. Implemented that way.
+
 - `markdown` — unchanged from today.
 - `cells` — single pane, monospace, no wrapping, horizontal scroll.
-- `both` — two panes with a toggle (mobile: tabs; desktop: side by side). Markdown on the left.
-- Copy button per pane.
+- `both` — Markdown and cells as sibling tabs (the existing pattern), Markdown first.
+- Copy button per pane, copying the raw serialization rather than the rendered DOM.
 - Show the resolved `formulaMode` as a small label on the cells pane, so learners can see which
   variant they are looking at without reading the artifact source.
 
@@ -488,9 +493,20 @@ consumer reads it.
 }
 ```
 
-Existing consumers ignore unknown keys; no schema version bump. `paneViewed` is the only field
-that answers the question the exercise exists to ask — whether learners actually look at the
-cell format or stay on the familiar Markdown.
+`paneViewed` is the only field that answers the question the exercise exists to ask — whether
+learners actually look at the cell format or stay on the familiar Markdown.
+
+> **Correction.** "Existing consumers ignore unknown keys; no schema version bump" was wrong.
+> `normalizeInteraction` in `hslu-aire-server/src/database.ts` is a **whitelist**: for
+> `docconvert` it rebuilt the record as `{ type, converted, at }` and dropped everything else
+> silently. Every field above had to be added there explicitly, with per-field validation, or
+> the telemetry would have been written and discarded with no error. Adding a field to this
+> payload is always a server change, never client-only.
+
+Recording cost: `record()` issues one POST per call, so `paneViewed` is **not** sent on every
+tab click. It is recorded once at conversion (the initial pane) and once more the first time
+the learner opens the cells pane — at most one extra request, which is enough to answer the
+question.
 
 ---
 
@@ -636,8 +652,11 @@ and memory at the same time.
 
 ## 14. Open decisions
 
-1. **`serialized` removal.** Needs a consumer audit in `hslu-aire-server` before the field can
-   go. Until then the response carries two row-wise formats, which is confusing.
+1. **`serialized` removal.** — **audit done.** `hslu-aire-server` reads nothing; it is a pure
+   pass-through proxy (`res.json(data)`, `src/index.ts`). The only consumer was the **wizard**
+   (`convertApi.ts`, `DocConvert.tsx`, `labels.ts`), which has now been migrated to
+   `excel.cells`. `serialized` can be deleted from the doc service **once the wizard change is
+   deployed** — not before, or the running frontend loses its middle tab.
 2. ~~**`.xls` in the first cut.**~~ — **resolved, D3: out of scope.** `.xls` is treated as
    non-tabular for `cells`; its Markdown path is unchanged.
 3. ~~**Row limit vs. instance size**~~ — **resolved.** Measured (§12.2): merges come from a
