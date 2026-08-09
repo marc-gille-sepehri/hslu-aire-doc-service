@@ -15,6 +15,28 @@ It is called **server-to-server** by `hslu-aire-server` and is **not exposed pub
   `{ "kind": "markdown", "filename", "markdown" }` or
   `{ "kind": "excel", "filename", "excel": { sheets: [...] } }`.
 
+  Optional form fields (both default to today's behaviour, so existing callers are unaffected):
+
+  | field | values | default | meaning |
+  |---|---|---|---|
+  | `outputFormat` | `markdown` \| `cells` \| `both` | `markdown` | add the cell-addressed serialization |
+  | `formulaMode` | `silent` \| `error` \| `formula` | `silent` | how formula cells are rendered in `cells` |
+
+  With `cells` or `both`, the response gains a `cells` object (`text`, `sheets`, `formulaMode`,
+  `truncated`, `warnings`). For an input without table structure — PDF, DOCX, `.xls` — it is
+  `{ "applicable": false, "message": "Zellenformat nicht anwendbar …" }` with HTTP 200; the
+  conversion is never failed over an inapplicable format request.
+
+  ```bash
+  curl -F file=@objektliste.xlsx -F outputFormat=cells -F formulaMode=formula localhost:8080/convert
+  ```
+
+  Format and rationale: [`docs/delta-spec-doc-convert-cells.md`](docs/delta-spec-doc-convert-cells.md).
+
+  > `excel.serialized` is the **older** row-wise format (0-based numeric row/column indices) and
+  > is deprecated in favour of `excel.cells`. It is still emitted; remove only after auditing
+  > consumers in `hslu-aire-server`.
+
 ## Config (env)
 
 | var | default | meaning |
@@ -33,6 +55,14 @@ pip install fastapi 'uvicorn[standard]' python-multipart pandas openpyxl   # lig
 # pip install -r requirements.txt                                          # full: also installs Docling (torch, ~GB)
 uvicorn app.main:app --reload --port 8080
 curl -F file=@some.xlsx http://localhost:8080/convert
+```
+
+Tests (spreadsheet paths only — no Docling needed):
+
+```bash
+pip install pytest httpx
+python -m pytest tests/ -q
+python tests/make_fixtures.py    # only after changing a fixture
 ```
 
 ## Build & run with Docker
@@ -71,8 +101,33 @@ Then create the App Runner service (Console or CLI):
 - **Instance**: 1 vCPU, 4 GB.
 - **Env**: `SERVICE_TOKEN=<a long random secret>`.
 - **Networking**: default (public ingress is fine; it's still token-guarded). For extra safety put it in a VPC and reach it via VPC connector from the portal.
+- **Autoscaling**: **do not leave this on `DefaultConfiguration`** — see below.
 
 Take note of the service's default URL (`https://xxxx.eu-central-1.awsapprunner.com`).
+
+### Autoscaling: cap the concurrency
+
+App Runner's default sends up to **100 concurrent requests to a single container**. That is
+wrong for this service: `/convert` reads the whole upload into memory (`await file.read()`), so
+100 in-flight requests are ~3 GB of buffers at the 30 MB limit — before any parsing — on a 4 GB
+instance that also holds Torch.
+
+The service uses `doc-service-lowconc` (MaxConcurrency 2, Min 1, Max 10): a third simultaneous
+request starts a *second instance* instead of sharing the first one's memory. Idle cost is
+unchanged — only `MinSize` instances are billed at rest.
+
+```bash
+aws apprunner create-auto-scaling-configuration \
+  --auto-scaling-configuration-name doc-service-lowconc \
+  --max-concurrency 2 --min-size 1 --max-size 10 --region eu-central-1
+
+aws apprunner update-service --region eu-central-1 \
+  --service-arn <service-arn> --auto-scaling-configuration-arn <arn-from-above>
+```
+
+Autoscaling configurations are immutable — changing the values means creating a new revision and
+re-attaching it (which redeploys the service). This service is **not** Terraform-managed; only
+`hslu-aire-server` is.
 
 ## Wire the portal to it
 
