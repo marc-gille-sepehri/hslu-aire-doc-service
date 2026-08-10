@@ -1,0 +1,12 @@
+# hslu-aire-media — extraction worker. Deliberately does NOT include Docling or
+# Torch: this service renders and parses, it does not run models. See
+# docs/spec-media-extraction.md §13.2.
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+boto3>=1.34
+lxml>=5.0
+python-pptx>=1.0
+PyMuPDF>=1.24          # AGPL-3.0 — see spec §14 open decision 3
+Pillow>=10.0
+cairosvg>=2.7

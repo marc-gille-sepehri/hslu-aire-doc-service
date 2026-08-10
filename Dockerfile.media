@@ -1,0 +1,46 @@
+# hslu-aire-media — extraction worker.
+#
+# Deliberately shares no layers with Dockerfile.amd64: that image carries Torch
+# and the Docling models and needs no LibreOffice; this one carries LibreOffice
+# and needs no models. Two images at ~1.5 GB and ~3.2 GB beat one at ~4.5 GB that
+# both services pull. See docs/spec-media-extraction.md §13.2.
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    # LibreOffice writes its per-invocation profile here; see app_media/libreoffice.py
+    HOME=/tmp
+
+WORKDIR /app
+
+# LibreOffice Impress is the render path (§4.3): its SVG export preserves <text>,
+# where pdftocairo converts labels to paths and makes them unsearchable and
+# useless to a screen reader.
+#
+# Fonts: metric-compatible substitutes only. Verdana and the MS core fonts are
+# not redistributable in an image without a licence — see spec §14 decision 2.
+# Substituting shifts metrics slightly; assets rendered with a substituted font
+# are flagged rather than silently accepted.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libreoffice-impress \
+        libreoffice-core \
+        fonts-liberation \
+        fonts-dejavu-core \
+        fontconfig \
+        libcairo2 \
+        libgl1 \
+        libglib2.0-0 \
+    && fc-cache -f \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-media.txt .
+RUN pip install -r requirements-media.txt
+
+COPY app_media ./app_media
+
+# Warm LibreOffice's first-run profile at build time rather than paying it on the
+# first real conversion, which would otherwise land inside a learner-visible job.
+RUN soffice --headless --terminate_after_init -env:UserInstallation=file:///tmp/lo-warm || true
+
+EXPOSE 8080
+CMD ["uvicorn", "app_media.main:app", "--host", "0.0.0.0", "--port", "8080"]

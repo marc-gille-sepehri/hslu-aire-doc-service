@@ -1,5 +1,20 @@
 # hslu-aire-doc-service
 
+This repository builds **two** service images from one source tree:
+
+| Image | Entrypoint | Carries | Purpose |
+|---|---|---|---|
+| `hslu-aire-doc-service` | `app.main:app` | Docling + Torch | documents → Markdown, spreadsheets → cells/analysis. Learner-facing. |
+| `hslu-aire-media` | `app_media.main:app` | LibreOffice | figure extraction from PPTX/PDF. Called by the portal, never by a browser. |
+
+They share no dependencies on purpose — the media worker runs no models and the
+doc service renders no documents. Spec and rationale:
+[`docs/spec-media-extraction.md`](docs/spec-media-extraction.md).
+
+---
+
+## Documents and spreadsheets (`hslu-aire-doc-service`)
+
 A small FastAPI microservice for the AI@RE training portal:
 
 - **Documents** (PDF, DOCX, PPTX, HTML, images, …) → **Markdown** via [Docling](https://github.com/DS4SD/docling).
@@ -143,3 +158,42 @@ The portal proxies uploads from the "Dokument → Markdown" training block to `P
 - **Cold start**: none while always-on. (If you later move to Lambda, expect 15–30 s cold starts unless you use SnapStart.)
 - **Pin Docling** (`requirements.txt`) before deploying so the model-prefetch line in the `Dockerfile` matches the installed version.
 - **OCR** (scanned PDFs) is available in Docling but heavier; enable per-document via a Docling pipeline option if needed.
+
+---
+
+## Media extraction (`hslu-aire-media`)
+
+Stateless: request in, data out. No database, no LLM, nothing remembered between
+calls — the portal owns the job, the metadata and the orchestration. See
+[`docs/spec-media-extraction.md`](docs/spec-media-extraction.md) §0 for why the
+boundary sits there.
+
+| Endpoint | Does |
+|---|---|
+| `GET /health` | liveness |
+| `POST /v1/media/prepare` | deck → PDF + per-slide PNGs in S3, once per document |
+| `POST /v1/media/candidates` | enumerate figure candidates (XML only, fast) |
+| `POST /v1/media/render` | sanitise/derive one candidate, write blobs, return hash + flags |
+| `POST /v1/media/cleanup` | drop `media/work/<jobId>/`; blobs are never deleted |
+
+Config: `SERVICE_TOKEN`, `MEDIA_BUCKET`, `MEDIA_PREFIX` (default `media`),
+`SOFFICE_BIN`, `LO_CONVERT_TIMEOUT_S`, `MAX_UPLOAD_BYTES`.
+
+### Local dev
+
+Everything except the render path runs without LibreOffice:
+
+```bash
+pip install -r requirements-media.txt
+python -m pytest tests/test_media.py -q     # 32 tests, no LibreOffice needed
+MEDIA_BUCKET=… uvicorn app_media.main:app --reload --port 8081
+```
+
+`prepare` needs LibreOffice on the host (`brew install --cask libreoffice`, then
+`SOFFICE_BIN=/Applications/LibreOffice.app/Contents/MacOS/soffice`).
+
+### Build
+
+`buildspec.yml` builds both images. Set `BUILD_TARGET=media` as a CodeBuild
+environment override while iterating, so a media change does not re-push the
+~3 GB Torch layer.

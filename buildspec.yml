@@ -1,14 +1,24 @@
 version: 0.2
 
-# Native amd64 build of the doc-service image, run inside AWS CodeBuild and
-# pushed to ECR over the AWS-internal network. This exists because building
-# amd64 under QEMU on an Apple-Silicon Mac deadlocks (model prefetch) and
-# uploading the ~4 GB Torch layer from a home connection is unreliable.
+# Native amd64 builds of both service images, run inside AWS CodeBuild and pushed
+# to ECR over the AWS-internal network. This exists because building amd64 under
+# QEMU on an Apple-Silicon Mac deadlocks (model prefetch) and uploading the ~4 GB
+# Torch layer from a home connection is unreliable.
+#
+# Two images, one source zip, one build (docs/spec-media-extraction.md §13):
+#   hslu-aire-doc-service   Docling + Torch, no LibreOffice   ~3.2 GB
+#   hslu-aire-media         LibreOffice, no models            ~1.5 GB
+#
+# BUILD_TARGET selects one of them; unset builds both. Set it as a CodeBuild
+# environment-variable override when iterating on a single image, so a media
+# change does not re-push the Torch layer.
 
 env:
   variables:
     ECR: "302174038010.dkr.ecr.eu-central-1.amazonaws.com"
     REPO: "hslu-aire-doc-service"
+    MEDIA_REPO: "hslu-aire-media"
+    BUILD_TARGET: "all"
 
 phases:
   pre_build:
@@ -17,10 +27,26 @@ phases:
       - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR"
   build:
     commands:
-      - echo "Building image (Dockerfile.amd64)..."
-      - docker build -f Dockerfile.amd64 -t "$ECR/$REPO:latest" .
+      - |
+        if [ "$BUILD_TARGET" = "all" ] || [ "$BUILD_TARGET" = "doc" ]; then
+          echo "Building doc-service (Dockerfile.amd64)..."
+          docker build -f Dockerfile.amd64 -t "$ECR/$REPO:latest" .
+        fi
+      - |
+        if [ "$BUILD_TARGET" = "all" ] || [ "$BUILD_TARGET" = "media" ]; then
+          echo "Building media worker (Dockerfile.media)..."
+          docker build -f Dockerfile.media -t "$ECR/$MEDIA_REPO:latest" .
+        fi
   post_build:
     commands:
-      - echo "Pushing to ECR..."
-      - docker push "$ECR/$REPO:latest"
+      - |
+        if [ "$BUILD_TARGET" = "all" ] || [ "$BUILD_TARGET" = "doc" ]; then
+          echo "Pushing $REPO..."
+          docker push "$ECR/$REPO:latest"
+        fi
+      - |
+        if [ "$BUILD_TARGET" = "all" ] || [ "$BUILD_TARGET" = "media" ]; then
+          echo "Pushing $MEDIA_REPO..."
+          docker push "$ECR/$MEDIA_REPO:latest"
+        fi
       - echo "Done."
