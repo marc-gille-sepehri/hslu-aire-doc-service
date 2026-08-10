@@ -14,7 +14,14 @@ from PIL import Image, ImageCms
 WEB_EDGE = 1600
 THUMB_EDGE = 384
 SUPERSAMPLE = 2
-MAX_DECODED_PIXELS = 20 * 1024 * 1024 // 4   # §5: 20 MB decoded, checked from the header
+# §5 set this at "20 MB decoded", which works out to 5.2 megapixels — below an
+# ordinary high-DPI screenshot. Measured on real course material: a 3713x2475
+# screenshot (9.2 MP) was rejected, and with it the whole figure. The guard is
+# meant to stop a decompression bomb, not content, so it is expressed in pixels
+# and set far above anything a slide legitimately carries: 50 MP is ~200 MB
+# decoded, which one render at MaxConcurrency 1 absorbs, while a real bomb
+# (50000x50000 = 2500 MP) is still refused before it is decoded.
+MAX_DECODED_PIXELS = 50_000_000
 
 
 class DerivativeError(RuntimeError):
@@ -26,7 +33,9 @@ def _open_bounded(data: bytes) -> Image.Image:
     image = Image.open(io.BytesIO(data))
     w, h = image.size
     if w * h > MAX_DECODED_PIXELS:
-        raise DerivativeError(f"{w}x{h} exceeds the decoded-size limit")
+        raise DerivativeError(
+            f"{w}x{h} = {w * h / 1e6:.1f} MP exceeds the {MAX_DECODED_PIXELS / 1e6:.0f} MP decode limit"
+        )
     image.load()
     return image
 

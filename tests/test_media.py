@@ -389,3 +389,42 @@ def test_header_band_rejection_needs_repetition():
     assert _in_band(RectEmu(0, 950, 100, 30), page) is True     # narrow, in the band
     assert _in_band(RectEmu(0, 950, 400, 30), page) is False    # wide enough to be content
     assert _in_band(RectEmu(0, 400, 100, 30), page) is False    # mid-page
+
+
+# ── §5 decode guard ─────────────────────────────────────────────────────────
+
+def test_ordinary_high_dpi_screenshot_is_accepted():
+    """Regression: the guard was set at 20 MB decoded, i.e. 5.2 MP — below a
+    normal screenshot. Five figures in a real 128-slide deck were dropped by it,
+    including a 3713x2475 one. It is a decompression-bomb guard, not a content
+    limit."""
+    from PIL import Image
+
+    from app_media.derivatives import MAX_DECODED_PIXELS, normalise
+
+    assert 3713 * 2475 < MAX_DECODED_PIXELS
+
+    buf = io.BytesIO()
+    Image.new("RGB", (3713, 2475), "white").save(buf, format="PNG")
+    assert normalise(buf.getvalue()).size == (3713, 2475)
+
+
+def test_a_decompression_bomb_is_still_refused():
+    from app_media.derivatives import MAX_DECODED_PIXELS, DerivativeError, _open_bounded
+
+    class FakeHuge:
+        size = (50000, 50000)
+
+        def load(self):
+            raise AssertionError("must be refused from the header, before decoding")
+
+    assert 50000 * 50000 > MAX_DECODED_PIXELS
+    import app_media.derivatives as d
+
+    original = d.Image.open
+    d.Image.open = lambda _b: FakeHuge()
+    try:
+        with pytest.raises(DerivativeError, match="decode limit"):
+            _open_bounded(b"x")
+    finally:
+        d.Image.open = original
