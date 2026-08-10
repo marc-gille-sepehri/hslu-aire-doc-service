@@ -17,14 +17,28 @@ WORKDIR /app
 # where pdftocairo converts labels to paths and makes them unsearchable and
 # useless to a screen reader.
 #
-# Fonts: metric-compatible substitutes only. Verdana and the MS core fonts are
-# not redistributable in an image without a licence — see spec §14 decision 2.
-# Substituting shifts metrics slightly; assets rendered with a substituted font
-# are flagged rather than silently accepted.
+# Fonts. Measured against a real house deck rather than guessed: Arial (192
+# uses), Lato (116), then a long tail of Symbol, Wingdings and Windows UI faces.
+#
+#   fonts-liberation      metric-compatible with Arial, Times, Courier
+#   fonts-lato            the house font — free, and the single biggest gap:
+#                         without it 116 runs of text were laid out with the
+#                         wrong metrics and overflowed their boxes
+#   fonts-crosextra-*     Carlito/Caladea, metric-compatible with Calibri/Cambria
+#   fonts-dejavu-core     broad Unicode coverage for the tail
+#
+# Verdana and the rest of the MS core fonts are still absent — not
+# redistributable in an image without a licence (spec §14 decision 2) — but the
+# deck uses Verdana twice, so this is now a rounding error rather than the
+# problem it looked like. Symbol and Wingdings remain unsolved: they are symbol
+# fonts, and a substitute renders different glyphs, not merely different metrics.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-impress \
         libreoffice-core \
         fonts-liberation \
+        fonts-lato \
+        fonts-crosextra-carlito \
+        fonts-crosextra-caladea \
         fonts-dejavu-core \
         fontconfig \
         libcairo2 \

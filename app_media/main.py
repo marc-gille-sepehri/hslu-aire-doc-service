@@ -17,7 +17,7 @@ from fastapi import Body, FastAPI, File, Form, Header, HTTPException, UploadFile
 
 from . import libreoffice, storage
 from .pdf_scan import scan_pdf
-from .pptx_scan import scan_pptx
+from .pptx_scan import deck_fonts, scan_pptx
 from .render_pipeline import render_candidate
 
 app = FastAPI(title="hslu-aire-media", version="0.1.0")
@@ -220,7 +220,15 @@ async def render(
                     detail="pdfKey is required for shape_group/chart candidates — run prepare first",
                 )
 
-        missing = libreoffice.check_fonts(set(parsed.get("requiredFonts") or []))
+        # Enumerate from the deck rather than from the request: the caller cannot
+        # know which typefaces are inside a file it only forwards.
+        required = set(parsed.get("requiredFonts") or [])
+        if source_type == "pptx" and not required:
+            try:
+                required = deck_fonts(str(source))
+            except Exception:       # a malformed part must not fail the render
+                required = set()
+        missing = libreoffice.check_fonts(required)
         results = [
             render_candidate(source, c, pdf, source_type, missing).as_dict()
             for c in candidates

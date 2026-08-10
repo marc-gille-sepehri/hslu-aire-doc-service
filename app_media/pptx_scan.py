@@ -279,6 +279,39 @@ def scan_pptx(path: str) -> tuple[list[SlideScan], RectEmu, list[dict]]:
     return scans, page, rejections
 
 
+def deck_fonts(path: str) -> set[str]:
+    """Every typeface the deck references.
+
+    Reads the parts directly rather than through python-pptx: theme fonts live in
+    `ppt/theme/themeN.xml` and per-run overrides in `a:rPr/a:latin/@typeface`
+    across the slides, and §4.3 needs both — a theme-only check misses the one
+    hand-set label that overflows.
+
+    The service does this itself instead of trusting the caller to declare the
+    fonts. It holds the file; asking the orchestrator to know what is inside it
+    would be a contract nobody can honour.
+    """
+    import re
+    import zipfile
+
+    found: set[str] = set()
+    pattern = re.compile(r'typeface="([^"]+)"')
+    with zipfile.ZipFile(path) as z:
+        for name in z.namelist():
+            if not name.endswith(".xml"):
+                continue
+            if not (name.startswith("ppt/slides/") or name.startswith("ppt/theme/")
+                    or name.startswith("ppt/slideLayouts/") or name.startswith("ppt/slideMasters/")):
+                continue
+            xml = z.read(name).decode("utf-8", "replace")
+            for match in pattern.finditer(xml):
+                face = match.group(1).strip()
+                # "+mj-lt" / "+mn-lt" are theme references, not typefaces.
+                if face and not face.startswith("+"):
+                    found.add(face)
+    return found
+
+
 def extract_media(path: str, slide: int, shape_id: str) -> tuple[bytes, str]:
     """Return (bytes, extension) for a picture-backed candidate.
 
