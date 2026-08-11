@@ -220,6 +220,16 @@ picture" both crashes on it (python-pptx's `Picture.image` raises rather than re
 once that is caught, drops it into shape clustering, where a vector would be re-rendered from the PDF
 as a picture of itself.
 
+**Hidden slides are skipped, and slide number ≠ PDF page.** A slide with `show="0"` is the author
+saying it is not part of the material, so it produces no candidates. LibreOffice also leaves it out
+of the PDF export, which means that after the first hidden slide the slide number and the PDF page
+diverge. Every candidate therefore carries **both**: `slide` addresses a shape inside the PPTX and is
+what the author sees in PowerPoint; `pdfPage` is what the render path loads.
+
+Collapsing the two is not a cosmetic error. On a 196-slide deck with 15 hidden slides it lost five
+figures outright — and those were the lucky ones, because a page past the end of the document raises.
+A slide merely shifted by fifteen loads a real page and renders the wrong picture perfectly.
+
 ### 3.1 PPTX enumeration
 
 Do not walk `ppt/media/` directly. Walk `ppt/slides/slideN.xml` and resolve images through

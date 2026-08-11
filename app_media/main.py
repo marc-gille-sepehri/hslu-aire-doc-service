@@ -198,6 +198,9 @@ async def candidates(
         slides = [
             {
                 "slide": s.number,
+                # Hidden slides are skipped, so this is not s.number once a deck
+                # has any: LibreOffice leaves them out of the PDF (§3.1).
+                "pdfPage": s.pdf_page if s.pdf_page is not None else s.number,
                 "context": {
                     "slideTitle": s.title,
                     "surroundingText": s.surrounding_text,

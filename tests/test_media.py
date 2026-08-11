@@ -320,6 +320,46 @@ def test_a_failing_shape_names_its_slide():
     assert "Kaputt" in str(caught.value)
 
 
+def test_hidden_slides_are_skipped_and_pdf_pages_shift():
+    """LibreOffice leaves hidden slides out of the PDF export, so slide number
+    and PDF page stop agreeing after the first hidden one. Collapsing them lost
+    five figures on a 196-slide deck — and would have quietly rendered the wrong
+    picture for the rest, because a shifted page loads fine."""
+    from pptx.enum.shapes import MSO_SHAPE
+
+    def build(prs):
+        for i in range(4):
+            slide = prs.slides.add_slide(prs.slide_layouts[6])
+            for j in range(3):
+                slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,
+                                       Inches(1 + j * 3), Inches(3), Inches(2.9), Inches(6))
+            if i == 1:                     # hide the second slide
+                slide._element.set("show", "0")
+
+    scans, _, _ = scan_pptx(_deck_with(build))
+
+    assert [s.number for s in scans] == [1, 3, 4]        # slide 2 is gone entirely
+    assert [s.pdf_page for s in scans] == [1, 2, 3]      # …and the pages closed up
+    # The candidates carry the page, since that is what the renderer addresses.
+    assert [c.as_dict()["pdfPage"] for s in scans for c in s.candidates] == [1, 2, 3]
+    assert [c.as_dict()["slide"] for s in scans for c in s.candidates] == [1, 3, 4]
+
+
+def test_pdf_page_defaults_to_the_slide_number():
+    """A deck with nothing hidden must be unaffected, and a caller predating the
+    field must keep working."""
+    from pptx.enum.shapes import MSO_SHAPE
+
+    def build(prs):
+        for _ in range(3):
+            slide = prs.slides.add_slide(prs.slide_layouts[6])
+            slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,
+                                   Inches(1), Inches(3), Inches(4), Inches(4))
+
+    scans, _, _ = scan_pptx(_deck_with(build))
+    assert [s.number for s in scans] == [s.pdf_page for s in scans] == [1, 2, 3]
+
+
 def test_context_is_extracted():
     """§7.1 — context is the more valuable half, and it is extracted, not inferred."""
     def build(prs):

@@ -58,10 +58,14 @@ class Candidate:
     src_rect: dict | None = None   # §3.1 — the on-slide crop, insets in 1/100000
     contained_smartart: bool = False
     native_pixels: tuple[int, int] | None = None
+    # Where this slide landed in the exported PDF. Equal to `slide` unless the
+    # deck hides slides — see `_visible_slides`.
+    pdf_page: int | None = None
 
     def as_dict(self) -> dict:
         return {
             "slide": self.slide,
+            "pdfPage": self.pdf_page if self.pdf_page is not None else self.slide,
             "class": self.cls,
             "boundingBoxEmu": self.rect.as_dict(),
             "boundingBoxPt": self.rect.as_points(),
@@ -80,6 +84,7 @@ class SlideScan:
     surrounding_text: str
     speaker_notes: str
     layout_name: str | None
+    pdf_page: int | None = None
     candidates: list[Candidate] = field(default_factory=list)
 
 
@@ -324,6 +329,32 @@ def _read_shape(shape, index: int, scan: SlideScan, boxes: list[Box], hash_slide
     )
 
 
+def _visible_slides(prs) -> list[tuple[int, int, object]]:
+    """Yield (slide number, PDF page, slide) for the slides that are not hidden.
+
+    Two numbers, because they are two different things and a deck with hidden
+    slides makes them disagree. The slide number is what PowerPoint shows the
+    author and what addresses a shape inside the PPTX; the PDF page is where
+    LibreOffice put it, and LibreOffice omits hidden slides from the export.
+
+    Collapsing them cost us five figures on a 196-slide deck with 15 hidden
+    slides — and would have cost more quietly, because a slide number past the
+    end of the PDF raises, while one merely shifted by fifteen renders the wrong
+    picture perfectly.
+
+    Hidden slides are skipped rather than mapped: hiding a slide is the author
+    saying it is not part of the material.
+    """
+    out: list[tuple[int, int, object]] = []
+    page = 0
+    for index, slide in enumerate(prs.slides, start=1):
+        if slide._element.get("show") == "0":  # noqa: SLF001
+            continue
+        page += 1
+        out.append((index, page, slide))
+    return out
+
+
 def scan_pptx(path: str) -> tuple[list[SlideScan], RectEmu, list[dict]]:
     """Return (slides, slide_rect, rejections).
 
@@ -337,7 +368,7 @@ def scan_pptx(path: str) -> tuple[list[SlideScan], RectEmu, list[dict]]:
     scans: list[SlideScan] = []
     hash_slides: dict[str, set[int]] = defaultdict(set)
 
-    for index, slide in enumerate(prs.slides, start=1):
+    for index, pdf_page, slide in _visible_slides(prs):
         title, surrounding = _slide_text(slide)
         notes = ""
         if slide.has_notes_slide and slide.notes_slide.notes_text_frame is not None:
@@ -349,6 +380,7 @@ def scan_pptx(path: str) -> tuple[list[SlideScan], RectEmu, list[dict]]:
             surrounding_text=surrounding,
             speaker_notes=notes,
             layout_name=getattr(slide.slide_layout, "name", None),
+            pdf_page=pdf_page,
         )
 
         boxes: list[Box] = []
@@ -393,6 +425,12 @@ def scan_pptx(path: str) -> tuple[list[SlideScan], RectEmu, list[dict]]:
                         contained_smartart=first.preformed_group and len(cluster.boxes) == 1,
                     )
                 )
+
+        # Stamped once, here, rather than at each of the three places a Candidate
+        # is built: a rendering that silently reads the wrong PDF page is the
+        # failure mode, so it must not depend on remembering an argument.
+        for candidate in scan.candidates:
+            candidate.pdf_page = pdf_page
 
         scans.append(scan)
 

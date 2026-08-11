@@ -117,6 +117,11 @@ def render_candidate(
     cls = candidate.get("class")
     box = _rect(candidate["boundingBoxEmu"]) if candidate.get("boundingBoxEmu") else None
     slide = int(candidate.get("slide", 1))
+    # Addressing a shape inside the PPTX and addressing a page in the exported
+    # PDF are two different numbers whenever the deck hides slides — LibreOffice
+    # omits those from the export. Defaults to `slide` for PDF sources and for
+    # any caller predating the field.
+    pdf_page = int(candidate.get("pdfPage") or slide)
     shape_ids = candidate.get("shapeIds") or []
 
     try:
@@ -126,21 +131,22 @@ def render_candidate(
             return _svg_result(clean, report, "passthrough_svg", 1.0, box)   # §4.1
 
         if cls == "vector_import" and source_type == "pptx":
-            return _render_vector_import(source, slide, shape_ids, candidate, box, pdf)
+            return _render_vector_import(source, slide, pdf_page, shape_ids, candidate, box, pdf)
 
         if cls == "raster":
-            return _render_raster(source, slide, shape_ids, candidate, box, source_type, pdf)
+            return _render_raster(source, slide, pdf_page, shape_ids, candidate, box,
+                                  source_type, pdf)
 
         # chart and shape_group both take the render path in v1: §12 scopes chart
         # redraw to a later iteration, and §4.2 says an unsupported chart type
         # falls back here and is marked.
-        return _render_and_crop(pdf, slide, box, candidate, cls, missing_fonts)
+        return _render_and_crop(pdf, pdf_page, box, candidate, cls, missing_fonts)
 
     except (SanitisationError, CropError, DerivativeError, KeyError, ValueError) as e:
         return RenderResult(ok=False, error=f"{type(e).__name__}: {e}")
 
 
-def _render_vector_import(source, slide, shape_ids, candidate, box, pdf) -> RenderResult:
+def _render_vector_import(source, slide, pdf_page, shape_ids, candidate, box, pdf) -> RenderResult:
     """§4.2 — EMF/WMF through LibreOffice."""
     raw, ext = pptx_scan.extract_media(str(source), slide, shape_ids[0])
     import tempfile
@@ -151,19 +157,19 @@ def _render_vector_import(source, slide, shape_ids, candidate, box, pdf) -> Rend
         try:
             produced = libreoffice.convert(src, Path(tmp) / "out", "svg")
         except libreoffice.LibreOfficeError:
-            return _render_and_crop(pdf, slide, box, candidate, "vector_import", None)
+            return _render_and_crop(pdf, pdf_page, box, candidate, "vector_import", None)
         clean, report = sanitise_svg(produced.read_bytes(), candidate.get("idPrefix", "a"))
     return _svg_result(clean, report, "convert_libreoffice", 0.9, box)
 
 
-def _render_raster(source, slide, shape_ids, candidate, box, source_type, pdf) -> RenderResult:
+def _render_raster(source, slide, pdf_page, shape_ids, candidate, box, source_type, pdf) -> RenderResult:
     if source_type == "pptx":
         raw, _ = pptx_scan.extract_media(str(source), slide, shape_ids[0])
         image = crop_src_rect(normalise(raw), candidate.get("srcRect"))   # §3.1
     else:
         if pdf is None:
             raise ValueError("PDF raster candidate needs the prepared PDF")
-        image = normalise(pdf_scan.render_region(str(pdf), slide, box))
+        image = normalise(pdf_scan.render_region(str(pdf), pdf_page, box))
 
     flags = {"vectorConfidence": 0.0}
     if box:
@@ -178,8 +184,13 @@ def _render_raster(source, slide, shape_ids, candidate, box, source_type, pdf) -
     )
 
 
-def _render_and_crop(pdf, slide, box, candidate, cls, missing_fonts) -> RenderResult:
-    """§4.3 — page SVG, cropped to the candidate; §4.4 raster fallback."""
+def _render_and_crop(pdf, pdf_page, box, candidate, cls, missing_fonts) -> RenderResult:
+    """§4.3 — page SVG, cropped to the candidate; §4.4 raster fallback.
+
+    Takes a PDF page, not a slide number: the two differ once a deck hides
+    slides, and this is the path where the difference silently renders the wrong
+    picture instead of raising.
+    """
     if pdf is None or box is None:
         raise ValueError("shape_group needs the prepared PDF and a bounding box")
 
@@ -189,7 +200,7 @@ def _render_and_crop(pdf, slide, box, candidate, cls, missing_fonts) -> RenderRe
         flags["fontSubstituted"] = sorted(missing_fonts)
 
     try:
-        page_svg = pdf_scan.page_to_svg(str(pdf), slide)
+        page_svg = pdf_scan.page_to_svg(str(pdf), pdf_page)
         cropped = crop_svg(page_svg, box, clip_id=candidate.get("idPrefix", "cand"))
         clean, report = sanitise_svg(cropped, candidate.get("idPrefix", "a"))
         if report["drawingElementCount"] >= MIN_DRAWING_ELEMENTS:
@@ -204,7 +215,7 @@ def _render_and_crop(pdf, slide, box, candidate, cls, missing_fonts) -> RenderRe
         reason = str(e)
 
     # §4.4 — still write something usable, and say why it is a raster.
-    image = normalise(pdf_scan.render_region(str(pdf), slide, box))
+    image = normalise(pdf_scan.render_region(str(pdf), pdf_page, box))
     flags |= {"vectorConfidence": 0.0, "vectorConversionFailed": reason,
               "resolutionAdequacy": round(resolution_adequacy(image.size[0], emu_to_pt(box.w)), 3)}
     original, keys, dims = _store_raster(image, flags)
