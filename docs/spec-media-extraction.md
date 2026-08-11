@@ -152,9 +152,28 @@ storing it, and the media service downloads it once per instance and keeps it on
 remaining calls of that job (LRU, two entries, keyed on S3 key + ETag). A multipart `file` field
 still works and is what local runs and `curl` use.
 
-This is also what bounds the portal's exposure: the only place a source document occupies portal
-memory is the ingest request itself. Removing even that requires a presigned upload straight from
-the browser to S3 — the portal would then receive a key and never the bytes.
+**The browser uploads straight to S3.** The portal never sees a source document at all:
+
+```
+POST /admin/media/upload-url   { filename, contentType, size }  → { key, url, expiresIn }
+PUT  <url>                     the file, from the browser, direct to S3
+POST /admin/media/ingest       { documentKey, filename }        → 202 { jobId }
+```
+
+The signature commits to the exact key and content type, expires in 15 minutes, and is issued only
+to an authenticated administrator. This requires bucket CORS allowing `PUT` from the portal's origin
+— without it the browser refuses the request before making it. The CORS rule is set on the bucket
+directly and is **not** in Terraform; if the bucket is ever recreated it must be restored.
+
+`ingest` then HEADs the object to confirm the upload landed, and asks the media service for the
+SHA-256 (`POST /v1/media/hash`) because §2's idempotency key is the source hash and this side no
+longer has the bytes. Hashing on the extraction side is the stronger claim anyway — it is the hash
+of what was actually read, not of what a client said it sent — and it warms the source cache that
+`prepare` reads seconds later.
+
+A raw-body `POST /admin/media/ingest` still works for curl and local runs. It is now the only path
+that puts a source document in portal memory, and is capped well below the S3 path's limit for that
+reason.
 
 **`prepare` is the only phase that risks an HTTP timeout.** A 120-slide deck converts in roughly
 60–180 s. App Runner's request timeout is configurable; measure a real deck against the configured

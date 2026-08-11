@@ -36,6 +36,33 @@ def health():
     return {"ok": True, "service": "hslu-aire-media"}
 
 
+@app.post("/v1/media/hash")
+async def hash_source(
+    sourceKey: str = Form(...),
+    authorization: str = Header(default=""),
+):
+    """SHA-256 of an object in S3, without the caller ever reading it.
+
+    §2's idempotency key is the source document's hash, and the portal used to
+    have it for free because the upload passed through it. Once the browser
+    uploads straight to S3 (§2.1) the portal holds only a key, and something has
+    to turn that into a hash. Doing it here is not a workaround: the hash of what
+    the extractor actually read is a stronger claim than the hash of what a
+    client said it sent, and this is also the only process that can produce it
+    without moving 285 MB somewhere it is not needed.
+
+    Cheap in practice — it warms the cache the very next `prepare` call reads.
+    """
+    _auth(authorization)
+    try:
+        _, digest, size = source_cache.fetch(sourceKey, MAX_BYTES)
+    except source_cache.SourceTooLarge as e:
+        raise HTTPException(status_code=413, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001 — a missing key is the common case
+        raise HTTPException(status_code=404, detail=f"cannot read {sourceKey}: {e}") from e
+    return {"sourceSha256": digest, "bytes": size}
+
+
 
 async def _materialise(
     tmp: str,
