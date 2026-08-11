@@ -244,6 +244,82 @@ def test_bullet_slide_yields_no_candidate():
     assert scans[0].candidates == []
 
 
+def _svg_only_picture_deck() -> str:
+    """A deck whose picture carries an `svgBlip` and no raster fallback.
+
+    PowerPoint usually writes both. When it writes the SVG alone, `a:blip` has no
+    `r:embed` of its own — the shape python-pptx cannot turn into an image.
+    Built by stripping the fallback from a normal picture and moving its
+    relationship into the SVG extension, which is byte-for-byte the structure
+    found on slide 5 of the Modul-3 deck.
+    """
+    from PIL import Image
+    from pptx.oxml.ns import qn
+    from lxml import etree
+
+    from app_media.pptx_scan import SVG_EXT_URI
+
+    buf = io.BytesIO()
+    Image.new("RGB", (400, 300), "white").save(buf, format="PNG")
+
+    def build(prs):
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        pic = slide.shapes.add_picture(io.BytesIO(buf.getvalue()),
+                                       Inches(4), Inches(4), Inches(6), Inches(4))
+        blip = pic._element.find(f".//{qn('a:blip')}")
+        rid = blip.get(qn("r:embed"))
+        del blip.attrib[qn("r:embed")]
+        ext_lst = etree.SubElement(blip, qn("a:extLst"))
+        ext = etree.SubElement(ext_lst, qn("a:ext"))
+        ext.set("uri", SVG_EXT_URI)
+        svg_blip = etree.SubElement(
+            ext, "{http://schemas.microsoft.com/office/drawing/2016/SVG/main}svgBlip"
+        )
+        svg_blip.set(qn("r:embed"), rid)
+
+    return _deck_with(build)
+
+
+def test_svg_only_picture_does_not_abort_the_scan():
+    """Regression: `shape.image` *raises* for a blip without `r:embed`, so the
+    `getattr(shape, "image", None)` guard never applied. One such picture killed
+    the scan of a 129-slide deck with a bare "no embedded image"."""
+    scans, _, _ = scan_pptx(_svg_only_picture_deck())
+    cands = scans[0].candidates
+    assert len(cands) == 1
+    assert cands[0].cls == "svg_native"
+    # Hashed from the SVG part, so the frequency filter still sees a repeat.
+    assert cands[0].content_hash
+
+
+def test_a_failing_shape_names_its_slide():
+    """A scan that dies must say where. The original error carried no locator at
+    all, which turned a one-shape problem into a whole-deck mystery."""
+    import app_media.pptx_scan as scanner
+
+    def build(prs):
+        prs.slides.add_slide(prs.slide_layouts[6])
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        slide.shapes.add_textbox(Inches(1), Inches(1), Inches(2), Inches(1)).name = "Kaputt"
+
+    path = _deck_with(build)
+    original = scanner._read_shape
+    try:
+        def boom(shape, *args, **kwargs):
+            if shape.name == "Kaputt":
+                raise ValueError("no embedded image")
+            return original(shape, *args, **kwargs)
+
+        scanner._read_shape = boom
+        with pytest.raises(ValueError) as caught:
+            scan_pptx(path)
+    finally:
+        scanner._read_shape = original
+
+    assert "slide 2" in str(caught.value)
+    assert "Kaputt" in str(caught.value)
+
+
 def test_context_is_extracted():
     """§7.1 — context is the more valuable half, and it is extracted, not inferred."""
     def build(prs):

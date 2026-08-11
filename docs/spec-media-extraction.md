@@ -213,6 +213,13 @@ as one illustration. Five classes, resolved in this order:
 `svg_native` takes precedence over the PNG fallback PowerPoint stores alongside it. Emit the SVG and
 discard the fallback; do not register both.
 
+**The fallback may be absent.** PowerPoint usually writes a raster beside the `svgBlip`, but not
+always: `a:blip` can carry the SVG extension and no `r:embed` of its own. Such a picture is still
+picture-backed and still `svg_native` — treating "has an extractable raster" as the test for "is a
+picture" both crashes on it (python-pptx's `Picture.image` raises rather than returning nothing) and,
+once that is caught, drops it into shape clustering, where a vector would be re-rendered from the PDF
+as a picture of itself.
+
 ### 3.1 PPTX enumeration
 
 Do not walk `ppt/media/` directly. Walk `ppt/slides/slideN.xml` and resolve images through

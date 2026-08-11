@@ -167,6 +167,24 @@ def _blip_of(shape):
     return blips[0] if blips else None
 
 
+def _embedded_image(shape):
+    """The picture's raster part, or None when it has none.
+
+    `shape.image` is a property that *raises* when `a:blip` carries no
+    `r:embed`, so `getattr(shape, "image", None)` does not defend against it —
+    the default never applies.
+
+    A blip without `r:embed` is not a broken file. PowerPoint usually writes a
+    PNG fallback beside an `svgBlip`, but it may write the SVG alone, and that is
+    precisely the `svg_native` case §3 puts first. One such picture on slide 5
+    aborted the scan of a 129-slide deck.
+    """
+    try:
+        return shape.image
+    except (ValueError, AttributeError, KeyError):
+        return None
+
+
 def _is_svg_native(blip) -> bool:
     """PowerPoint stores an SVG alongside a PNG fallback; the SVG wins (§3)."""
     if blip is None:
@@ -245,6 +263,67 @@ def _slide_text(slide) -> tuple[str | None, str]:
     return title, "\n".join(parts)[:2000]
 
 
+def _read_shape(shape, index: int, scan: SlideScan, boxes: list[Box], hash_slides: dict) -> None:
+    """Turn one shape into a candidate, or into a box for clustering (§3).
+
+    Appends to `scan.candidates` for picture-backed and chart shapes — those are
+    their own classes and skip clustering — and to `boxes` for everything else.
+    """
+    rect = _rotated_extent(shape)
+    if rect is None:
+        return
+    shape_id = str(shape.shape_id)
+    uri = _graphic_uri(shape) if shape.shape_type is not None else None
+
+    if _is_furniture(shape):
+        return
+
+    image = _embedded_image(shape)
+    blip = _blip_of(shape)
+    # An SVG with no raster fallback is still picture-backed, and the best asset
+    # in the deck. Without this it would fall through to clustering and be
+    # re-rendered from the PDF — a vector discarded for a picture of itself.
+    svg_only = image is None and _is_svg_native(blip)
+
+    if image is not None or svg_only:
+        blob = getattr(image, "blob", b"") or (_svg_part(shape, blip) if svg_only else b"")
+        digest = hashlib.sha256(blob).hexdigest() if blob else None
+        if digest:
+            hash_slides[digest].add(index)
+        scan.candidates.append(
+            Candidate(
+                slide=index,
+                cls=_classify_picture(shape, image),
+                rect=rect,
+                shape_ids=[shape_id],
+                author_alt_text=_alt_text(shape),
+                shape_name=shape.name,
+                content_hash=digest,
+                src_rect=_src_rect(shape),
+                native_pixels=getattr(image, "size", None),
+            )
+        )
+        return
+
+    if uri == CHART_URI:
+        scan.candidates.append(
+            Candidate(index, "chart", rect, [shape_id], _alt_text(shape), shape.name)
+        )
+        return
+
+    is_diagram = uri == DIAGRAM_URI
+    boxes.append(
+        Box(
+            key=shape_id,
+            rect=rect,
+            has_fill=_has_fill(shape),
+            is_connector=bool(getattr(shape, "connector_type", None)),
+            is_text=bool(getattr(shape, "has_text_frame", False)),
+            preformed_group=bool(getattr(shape, "shapes", None)) or is_diagram,
+        )
+    )
+
+
 def scan_pptx(path: str) -> tuple[list[SlideScan], RectEmu, list[dict]]:
     """Return (slides, slide_rect, rejections).
 
@@ -274,55 +353,17 @@ def scan_pptx(path: str) -> tuple[list[SlideScan], RectEmu, list[dict]]:
 
         boxes: list[Box] = []
         for shape in _iter_shapes(slide.shapes):
-            rect = _rotated_extent(shape)
-            if rect is None:
-                continue
-            shape_id = str(shape.shape_id)
-            uri = _graphic_uri(shape) if shape.shape_type is not None else None
-
-            # Picture-backed candidates are their own class and skip clustering.
-            if _is_furniture(shape):
-                continue
-
-            image = getattr(shape, "image", None)
-            if image is not None:
-                blob = getattr(image, "blob", b"")
-                digest = hashlib.sha256(blob).hexdigest() if blob else None
-                if digest:
-                    hash_slides[digest].add(index)
-                scan.candidates.append(
-                    Candidate(
-                        slide=index,
-                        cls=_classify_picture(shape, image),
-                        rect=rect,
-                        shape_ids=[shape_id],
-                        author_alt_text=_alt_text(shape),
-                        shape_name=shape.name,
-                        content_hash=digest,
-                        src_rect=_src_rect(shape),
-                        native_pixels=getattr(image, "size", None),
-                    )
-                )
-                continue
-
-            if uri == CHART_URI:
-                scan.candidates.append(
-                    Candidate(index, "chart", rect, [shape_id],
-                              _alt_text(shape), shape.name)
-                )
-                continue
-
-            is_diagram = uri == DIAGRAM_URI
-            boxes.append(
-                Box(
-                    key=shape_id,
-                    rect=rect,
-                    has_fill=_has_fill(shape),
-                    is_connector=bool(getattr(shape, "connector_type", None)),
-                    is_text=bool(getattr(shape, "has_text_frame", False)),
-                    preformed_group=bool(getattr(shape, "shapes", None)) or is_diagram,
-                )
-            )
+            try:
+                _read_shape(shape, index, scan, boxes, hash_slides)
+            except Exception as e:  # noqa: BLE001
+                # One unreadable shape used to abort a 129-slide deck with a bare
+                # "no embedded image" and nothing to say which slide meant it.
+                # Still fatal — silently dropping a figure is worse than failing
+                # — but now it says where to look.
+                raise ValueError(
+                    f"slide {index}, shape {getattr(shape, 'name', '?')!r} "
+                    f"(id {getattr(shape, 'shape_id', '?')}): {e}"
+                ) from e
 
         content = [b for b in boxes if not _in_band(b.rect, page)]
         has_primitive = any(b.has_fill or b.is_connector or b.preformed_group for b in content)
@@ -412,7 +453,7 @@ def extract_media(path: str, slide: int, shape_id: str) -> tuple[bytes, str]:
             svg = _svg_part(shape, blip)
             if svg is not None:
                 return svg, "svg"
-        image = getattr(shape, "image", None)
+        image = _embedded_image(shape)
         if image is None:
             raise KeyError(f"shape {shape_id} on slide {slide} carries no media")
         return image.blob, (image.ext or "bin").lstrip(".").lower()
