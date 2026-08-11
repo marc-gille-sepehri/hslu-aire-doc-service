@@ -4,7 +4,9 @@ Covers what runs without LibreOffice: sanitisation (§5), clustering (§3.2),
 unit conversion (§3.2, §8.2) and PPTX enumeration (§3.1). The render path needs
 LibreOffice on the host and is exercised in the image, not here.
 """
+import hashlib
 import io
+from pathlib import Path
 
 import pytest
 from pptx import Presentation
@@ -494,3 +496,81 @@ def test_powerpoint_machine_alt_text_is_not_treated_as_the_authors():
     assert _is_machine_alt("Von KI generierte Inhalte können fehlerhaft sein.")
     assert not _is_machine_alt("Prozesslandkarte der Bewirtschaftung")
     assert not _is_machine_alt("")
+
+
+# ─────────────────────────── source cache (§2.1) ────────────────────────────
+# The deck is fetched once per job, not once per slide. These pin the two
+# properties that matter: a repeat call must not transfer anything, and a
+# changed ETag must not be served from the old file.
+
+class _FakeS3:
+    def __init__(self, payloads):
+        self.payloads = payloads          # key -> (etag, bytes)
+        self.downloads = 0
+
+    def head_object(self, Bucket, Key):
+        etag, body = self.payloads[Key]
+        return {"ETag": f'"{etag}"', "ContentLength": len(body)}
+
+
+def _install_fake_s3(monkeypatch, tmp_path, fake):
+    from app_media import source_cache, storage
+
+    def download_to(key, path):
+        fake.downloads += 1
+        Path(path).write_bytes(fake.payloads[key][1])
+
+    monkeypatch.setattr(storage, "s3", lambda: fake)
+    monkeypatch.setattr(storage, "download_to", download_to)
+    monkeypatch.setattr(source_cache, "CACHE_DIR", tmp_path / "cache")
+    source_cache._locks.clear()
+    return source_cache
+
+
+def test_source_cache_downloads_once_for_repeat_calls(monkeypatch, tmp_path):
+    fake = _FakeS3({"Kurse/deck.pptx": ("etag-1", b"x" * 4096)})
+    cache = _install_fake_s3(monkeypatch, tmp_path, fake)
+
+    first = cache.fetch("Kurse/deck.pptx", max_bytes=10_000)
+    second = cache.fetch("Kurse/deck.pptx", max_bytes=10_000)
+
+    assert first == second
+    assert fake.downloads == 1
+    assert first[1] == hashlib.sha256(b"x" * 4096).hexdigest()
+
+
+def test_source_cache_refetches_when_the_etag_changes(monkeypatch, tmp_path):
+    fake = _FakeS3({"Kurse/deck.pptx": ("etag-1", b"old")})
+    cache = _install_fake_s3(monkeypatch, tmp_path, fake)
+    cache.fetch("Kurse/deck.pptx", max_bytes=10_000)
+
+    fake.payloads["Kurse/deck.pptx"] = ("etag-2", b"new content")
+    path, digest, size = cache.fetch("Kurse/deck.pptx", max_bytes=10_000)
+
+    assert fake.downloads == 2
+    assert path.read_bytes() == b"new content"
+    assert digest == hashlib.sha256(b"new content").hexdigest()
+    assert size == len(b"new content")
+
+
+def test_source_cache_rejects_oversized_before_transferring(monkeypatch, tmp_path):
+    from app_media import source_cache
+
+    fake = _FakeS3({"Kurse/huge.pptx": ("etag-1", b"y" * 1000)})
+    cache = _install_fake_s3(monkeypatch, tmp_path, fake)
+
+    with pytest.raises(source_cache.SourceTooLarge):
+        cache.fetch("Kurse/huge.pptx", max_bytes=500)
+    assert fake.downloads == 0
+
+
+def test_source_cache_evicts_beyond_the_entry_limit(monkeypatch, tmp_path):
+    fake = _FakeS3({f"Kurse/d{i}.pptx": (f"etag-{i}", bytes([i]) * 64) for i in range(4)})
+    cache = _install_fake_s3(monkeypatch, tmp_path, fake)
+    monkeypatch.setattr(cache, "MAX_ENTRIES", 2)
+
+    for i in range(4):
+        cache.fetch(f"Kurse/d{i}.pptx", max_bytes=10_000)
+
+    kept = [p for p in cache.CACHE_DIR.iterdir() if p.suffix != ".sha256"]
+    assert len(kept) == 2

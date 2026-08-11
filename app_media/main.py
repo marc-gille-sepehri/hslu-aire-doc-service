@@ -15,7 +15,7 @@ from pathlib import Path
 
 from fastapi import Body, FastAPI, File, Form, Header, HTTPException, UploadFile
 
-from . import libreoffice, storage
+from . import libreoffice, source_cache, storage
 from .pdf_scan import scan_pdf
 from .pptx_scan import deck_fonts, scan_pptx
 from .render_pipeline import render_candidate
@@ -23,7 +23,7 @@ from .render_pipeline import render_candidate
 app = FastAPI(title="hslu-aire-media", version="0.1.0")
 
 SERVICE_TOKEN = os.environ.get("SERVICE_TOKEN", "").strip()
-MAX_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(60 * 1024 * 1024)))
+MAX_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(500 * 1024 * 1024)))
 
 
 def _auth(authorization: str) -> None:
@@ -36,10 +36,48 @@ def health():
     return {"ok": True, "service": "hslu-aire-media"}
 
 
+
+async def _materialise(
+    tmp: str,
+    file: UploadFile | None,
+    source_key: str | None,
+    fallback_name: str,
+) -> tuple[Path, str]:
+    """Put the source document on disk and return (path, sha256).
+
+    Prefers `sourceKey`: the orchestrator already stored the upload in S3, and
+    forwarding the bytes again means the file crosses the wire once per call —
+    35 calls over a 285 MB deck is ten gigabytes moved to convey nothing new.
+    Streaming it from S3 also keeps it off the Python heap, and the cache keeps
+    the repeat calls of one job from re-downloading it at all.
+
+    A direct upload still works, for local runs and curl.
+    """
+    if source_key:
+        try:
+            # NB: cached — outside `tmp`, and not the caller's to delete.
+            path, digest, _ = source_cache.fetch(source_key, MAX_BYTES)
+        except source_cache.SourceTooLarge as e:
+            raise HTTPException(status_code=413, detail=str(e)) from e
+        return path, digest
+
+    if file is None:
+        raise HTTPException(status_code=400, detail="either file or sourceKey is required")
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty file")
+    if len(data) > MAX_BYTES:
+        raise HTTPException(status_code=413, detail="file too large")
+    path = Path(tmp) / (file.filename or fallback_name)
+    path.write_bytes(data)
+    return path, storage.sha256_of(data)
+
+
 @app.post("/v1/media/prepare")
 async def prepare(
-    file: UploadFile = File(...),
     jobId: str = Form(...),
+    file: UploadFile | None = File(default=None),
+    sourceKey: str | None = Form(default=None),
     authorization: str = Header(default=""),
 ):
     """Deck → PDF + per-slide PNGs in S3, once per document (§4.3, §9).
@@ -49,17 +87,9 @@ async def prepare(
     LibreOffice back in the interactive path.
     """
     _auth(authorization)
-    data = await file.read()
-    if not data:
-        raise HTTPException(status_code=400, detail="empty file")
-    if len(data) > MAX_BYTES:
-        raise HTTPException(status_code=413, detail="file too large")
-
-    source_sha = storage.sha256_of(data)
-    name = file.filename or "deck.pptx"
     with tempfile.TemporaryDirectory() as tmp:
-        deck = Path(tmp) / name
-        deck.write_bytes(data)
+        deck, source_sha = await _materialise(tmp, file, sourceKey, "deck.pptx")
+        name = deck.name
         if name.lower().endswith(".pdf"):
             pdf = deck            # already a PDF — LibreOffice has nothing to do
         else:
@@ -106,21 +136,16 @@ def _render_slides(pdf: Path, source_sha: str) -> list[str]:
 
 @app.post("/v1/media/candidates")
 async def candidates(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(default=None),
+    sourceKey: str | None = Form(default=None),
     authorization: str = Header(default=""),
 ):
     """Enumerate figure candidates (§3). Pure XML work — fast, no rendering."""
     _auth(authorization)
-    data = await file.read()
-    if not data:
-        raise HTTPException(status_code=400, detail="empty file")
-
-    name = file.filename or "deck.pptx"
-    is_pdf = name.lower().endswith(".pdf")
-
     with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / name
-        path.write_bytes(data)
+        path, source_sha = await _materialise(tmp, file, sourceKey, "deck.pptx")
+        name = path.name
+        is_pdf = name.lower().endswith(".pdf")
         try:
             if is_pdf:
                 scans, page = scan_pdf(str(path))
@@ -158,7 +183,7 @@ async def candidates(
         ]
 
     return {
-        "sourceSha256": storage.sha256_of(data),
+        "sourceSha256": source_sha,
         "sourceType": "pdf" if is_pdf else "pptx",
         "slideSizeEmu": page.as_dict(),
         "slides": slides,
@@ -168,8 +193,9 @@ async def candidates(
 
 @app.post("/v1/media/render")
 async def render(
-    file: UploadFile = File(...),
     spec: str = Form(...),
+    file: UploadFile | None = File(default=None),
+    sourceKey: str | None = Form(default=None),
     authorization: str = Header(default=""),
 ):
     """Render every candidate on one slide and return what the portal needs to
@@ -177,9 +203,10 @@ async def render(
 
     Batched per slide rather than per candidate: §2.1 puts the loop in the portal,
     and one round trip per figure over a 120-slide deck is hundreds of requests
-    for no benefit. The source document is uploaded with the request instead of
-    the portal shipping extracted bytes back and forth — the media service is the
-    one that can read a PPTX part, so extraction stays on this side of the wire.
+    for no benefit. The request names the source rather than carrying it: the
+    portal wrote it to S3 at ingest, this service reads it from there (and keeps
+    it on disk between the slides of one job), so extraction stays on this side
+    of the wire without the deck crossing it once per slide.
 
     Returns no assetId and writes no metadata: that boundary is §0.
     """
@@ -193,18 +220,12 @@ async def render(
     if not candidates:
         raise HTTPException(status_code=400, detail="no candidates")
 
-    data = await file.read()
-    if len(data) > MAX_BYTES:
-        raise HTTPException(status_code=413, detail="file too large")
-
-    name = file.filename or "source"
-    source_type = "pptx" if name.lower().endswith((".pptx", ".pptm", ".ppt")) else "pdf"
-    needs_pdf = any(c.get("class") in ("shape_group", "chart") for c in candidates) or \
-        (source_type == "pdf")
-
     with tempfile.TemporaryDirectory() as tmp:
-        source = Path(tmp) / name
-        source.write_bytes(data)
+        source, _ = await _materialise(tmp, file, sourceKey, "source.pptx")
+        name = source.name
+        source_type = "pptx" if name.lower().endswith((".pptx", ".pptm", ".ppt")) else "pdf"
+        needs_pdf = any(c.get("class") in ("shape_group", "chart") for c in candidates) or \
+            (source_type == "pdf")
 
         pdf: Path | None = None
         if needs_pdf:

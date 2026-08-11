@@ -84,6 +84,18 @@ def get_object(key: str) -> bytes:
     return s3().get_object(Bucket=BUCKET, Key=key)["Body"].read()
 
 
+def download_to(key: str, path) -> None:
+    """Stream an object to disk.
+
+    Deliberately not get_object().read(): a source deck can be hundreds of
+    megabytes, and holding one in memory competes with LibreOffice and the page
+    bitmaps on a 4 GB instance for no reason — every consumer here wants a file
+    on disk anyway.
+    """
+    with open(path, "wb") as fh:
+        s3().download_fileobj(BUCKET, key, fh)
+
+
 def delete_prefix(prefix: str) -> int:
     """Clean up `media/work/<jobId>/` when a job ends. Blobs are never deleted."""
     paginator = s3().get_paginator("list_objects_v2")

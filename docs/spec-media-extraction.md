@@ -143,6 +143,19 @@ The portal drives the phases; each call to the media service is a normal HTTP re
 | `deriving` | portal-internal | descriptors + embeddings (§7.2) |
 | `indexing` | portal-internal | write assets, run the duplicate check (§8.3) |
 
+**The source is named, not carried.** Every call to the media service takes a `sourceKey` — the S3
+key the portal wrote at ingest — rather than the document as a multipart body. Forwarding the bytes
+is tolerable at 16 MB and absurd at 285: one deck × one `prepare` + one `candidates` + one `render`
+per slide is the whole file crossing the wire some 120 times, and it forces the portal to hold a
+copy in memory for the length of the job. With a key, the portal never reads the source after
+storing it, and the media service downloads it once per instance and keeps it on local disk for the
+remaining calls of that job (LRU, two entries, keyed on S3 key + ETag). A multipart `file` field
+still works and is what local runs and `curl` use.
+
+This is also what bounds the portal's exposure: the only place a source document occupies portal
+memory is the ingest request itself. Removing even that requires a presigned upload straight from
+the browser to S3 — the portal would then receive a key and never the bytes.
+
 **`prepare` is the only phase that risks an HTTP timeout.** A 120-slide deck converts in roughly
 60–180 s. App Runner's request timeout is configurable; measure a real deck against the configured
 value before assuming it fits. If it does not, only this phase needs an async handle — the rest of
