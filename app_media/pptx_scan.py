@@ -129,15 +129,35 @@ def _has_fill(shape) -> bool:
     return el.find(f".//{qn('a:fillRef')}") is not None
 
 
+# PowerPoint writes its own alt text and marks it. Measured on a house deck: the
+# values were English ("A person pointing at a screen"), on German slides, with
+# the disclaimer appended — while every generated description was correct German.
+#
+# §3.1 says author alt text outranks generation, and it should: a human who wrote
+# it knows what the picture is for. PowerPoint's guess is not that, and taking it
+# as authoritative both keeps a worse description and misreports altTextSource as
+# "author" for something no author touched.
+_MACHINE_ALT_MARKERS = (
+    "ai-generated content may be incorrect",
+    "von ki generierte inhalte können fehlerhaft sein",
+    "inhalt, der mit ki erstellt wurde",
+)
+
+
+def _is_machine_alt(value: str) -> bool:
+    lowered = value.casefold()
+    return any(marker in lowered for marker in _MACHINE_ALT_MARKERS)
+
+
 def _alt_text(shape) -> str | None:
-    """§3.1 — p:cNvPr/@descr and @title. Author-supplied, so it outranks generation."""
+    """§3.1 — p:cNvPr/@descr and @title, when a human actually wrote them."""
     try:
         nv = shape._element._nvXxPr.cNvPr  # noqa: SLF001 — python-pptx exposes no public accessor
     except Exception:
         return None
     for attr in ("descr", "title"):
         value = (nv.get(attr) or "").strip()
-        if value:
+        if value and not _is_machine_alt(value):
             return value
     return None
 

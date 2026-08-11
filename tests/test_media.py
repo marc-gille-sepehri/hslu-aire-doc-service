@@ -479,3 +479,18 @@ def test_a_slide_without_primitives_yields_nothing():
 
     scans, _, _ = scan_pptx(_deck_with(build))
     assert [c for c in scans[0].candidates if c.cls == "shape_group"] == []
+
+
+# ── §3.1 author alt text ────────────────────────────────────────────────────
+
+def test_powerpoint_machine_alt_text_is_not_treated_as_the_authors():
+    """Measured on a house deck: PowerPoint had written English alt text onto
+    German slides and marked it "AI-generated content may be incorrect". Taking
+    that as author-supplied kept a worse description than the pipeline's own and
+    reported altTextSource as "author" for something no author touched."""
+    from app_media.pptx_scan import _is_machine_alt
+
+    assert _is_machine_alt("A person pointing at a screen AI-generated content may be incorrect.")
+    assert _is_machine_alt("Von KI generierte Inhalte können fehlerhaft sein.")
+    assert not _is_machine_alt("Prozesslandkarte der Bewirtschaftung")
+    assert not _is_machine_alt("")
