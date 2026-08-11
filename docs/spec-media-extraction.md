@@ -214,6 +214,27 @@ is author-supplied and outranks any generated description.
 
 ### 3.2 Shape-group candidate detection
 
+> **Superseded by measurement.** The clustering below was implemented and then
+> replaced: on a real 128-slide module it cut single diagrams into their parts,
+> because a diagram's boxes are routinely further apart than the 0.25 in gap
+> threshold. Worst case was one illustration emitted as four assets.
+>
+> **The rule now: if a slide contains any drawing primitive, emit exactly one
+> candidate** covering everything on it except template furniture (title, footer,
+> slide number, date) and the top/bottom 8% bands. A reader perceives one
+> illustration; one asset is what should come out.
+>
+> Measured on that module: 24 candidates with a worst slide of 4, against 28
+> candidates with a worst slide of 1 — the whole-slide rule also finds *more*,
+> because the minimum-shape and minimum-area filters below were discarding whole
+> slides. `WHOLE_SLIDE_WHEN_PRIMITIVES` in `app_media/pptx_scan.py` switches back
+> for comparison; the clustering code is kept for that reason.
+>
+> §11.1's hand-labelled set was never built, and this is what it would have caught
+> before the thresholds reached production.
+
+The original clustering, retained behind the flag:
+
 Cluster shapes on a slide by bounding-box adjacency:
 
 1. Take all non-placeholder shapes, plus explicit `p:grpSp` groups as pre-formed clusters.

@@ -22,6 +22,24 @@ from .units import RectEmu
 FREQUENCY_FRACTION = 0.10
 FREQUENCY_FLOOR = 3
 
+# Whole-slide mode. Clustering a slide into several candidates looked right in
+# theory and was wrong in practice: on real decks it cut single diagrams into
+# their parts, because a diagram's boxes are often further apart than the gap
+# threshold. A reader perceives one illustration, so one asset is what should
+# come out.
+#
+# The rule: if a slide contains any drawing primitive at all, emit exactly one
+# candidate covering everything on it except the template furniture — title,
+# footer, slide number, date — and the header/footer bands.
+WHOLE_SLIDE_WHEN_PRIMITIVES = True
+HEADER_BAND = 0.08
+FOOTER_BAND = 0.08
+
+# Placeholder types that are slide furniture rather than content.
+FURNITURE_PLACEHOLDERS = {
+    "TITLE", "CENTER_TITLE", "SUBTITLE", "FOOTER", "SLIDE_NUMBER", "DATE",
+}
+
 SVG_EXT_URI = "{96DAC541-7B7A-43D3-8B79-37D633B846F1}"   # a:extLst → svgBlip
 DIAGRAM_URI = "http://schemas.openxmlformats.org/drawingml/2006/diagram"
 CHART_URI = "http://schemas.openxmlformats.org/drawingml/2006/chart"
@@ -170,6 +188,28 @@ def _iter_shapes(shapes) -> Iterator:
         yield shape
 
 
+def _is_furniture(shape) -> bool:
+    """Template furniture: the title bar, the footer, the page number.
+
+    §3.2 step 1 says "non-placeholder shapes" and this is where that is enforced.
+    Without it the union of a slide reaches from the title down to the page
+    number and every figure comes out with a header and a footer attached.
+    """
+    if not getattr(shape, "is_placeholder", False):
+        return False
+    try:
+        return str(shape.placeholder_format.type).split(" ")[0].upper() in FURNITURE_PLACEHOLDERS
+    except Exception:
+        return True          # a placeholder we cannot classify is not content
+
+
+def _in_band(rect: RectEmu, page: RectEmu) -> bool:
+    """Entirely inside the top or bottom band — a running header or footer."""
+    top = page.t + page.h * HEADER_BAND
+    bottom = page.b - page.h * FOOTER_BAND
+    return rect.b <= top or rect.t >= bottom
+
+
 def _slide_text(slide) -> tuple[str | None, str]:
     title, parts = None, []
     for shape in slide.shapes:
@@ -221,6 +261,9 @@ def scan_pptx(path: str) -> tuple[list[SlideScan], RectEmu, list[dict]]:
             uri = _graphic_uri(shape) if shape.shape_type is not None else None
 
             # Picture-backed candidates are their own class and skip clustering.
+            if _is_furniture(shape):
+                continue
+
             image = getattr(shape, "image", None)
             if image is not None:
                 blob = getattr(image, "blob", b"")
@@ -261,17 +304,34 @@ def scan_pptx(path: str) -> tuple[list[SlideScan], RectEmu, list[dict]]:
                 )
             )
 
-        for cluster in filter_clusters(cluster_boxes(boxes), page):
-            first = cluster.boxes[0]
+        content = [b for b in boxes if not _in_band(b.rect, page)]
+        has_primitive = any(b.has_fill or b.is_connector or b.preformed_group for b in content)
+
+        if WHOLE_SLIDE_WHEN_PRIMITIVES and has_primitive:
+            rect = content[0].rect
+            for b in content[1:]:
+                rect = rect.union(b.rect)
             scan.candidates.append(
                 Candidate(
                     slide=index,
                     cls="shape_group",
-                    rect=cluster.rect,
-                    shape_ids=cluster.keys,
-                    contained_smartart=first.preformed_group and len(cluster.boxes) == 1,
+                    rect=rect,
+                    shape_ids=[b.key for b in content],
+                    contained_smartart=any(b.preformed_group for b in content),
                 )
             )
+        elif not WHOLE_SLIDE_WHEN_PRIMITIVES:
+            for cluster in filter_clusters(cluster_boxes(boxes), page):
+                first = cluster.boxes[0]
+                scan.candidates.append(
+                    Candidate(
+                        slide=index,
+                        cls="shape_group",
+                        rect=cluster.rect,
+                        shape_ids=cluster.keys,
+                        contained_smartart=first.preformed_group and len(cluster.boxes) == 1,
+                    )
+                )
 
         scans.append(scan)
 

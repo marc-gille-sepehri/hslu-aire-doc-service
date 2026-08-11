@@ -428,3 +428,54 @@ def test_a_decompression_bomb_is_still_refused():
             _open_bounded(b"x")
     finally:
         d.Image.open = original
+
+
+# ── §3.2 whole-slide rule ───────────────────────────────────────────────────
+
+def test_a_slide_with_primitives_yields_exactly_one_candidate():
+    """Clustering split single diagrams into their parts on real decks: a
+    diagram's boxes are often further apart than the gap threshold, so one
+    illustration came out as four assets. A reader sees one picture."""
+    from pptx.enum.shapes import MSO_SHAPE
+
+    def build(prs):
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        # Deliberately far apart — the old clustering would make three candidates.
+        for i in range(3):
+            slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,
+                                   Inches(1 + i * 8), Inches(3), Inches(2), Inches(5))
+
+    scans, _, _ = scan_pptx(_deck_with(build))
+    groups = [c for c in scans[0].candidates if c.cls == "shape_group"]
+    assert len(groups) == 1
+    assert len(groups[0].shape_ids) == 3          # all of them, in one box
+
+
+def test_furniture_is_excluded_from_the_candidate():
+    """§3.2 step 1 — "non-placeholder shapes". Without it every figure comes out
+    with the slide title and the page number attached."""
+    from pptx.enum.shapes import MSO_SHAPE
+
+    from app_media.units import emu_to_pt
+
+    def build(prs):
+        slide = prs.slides.add_slide(prs.slide_layouts[5])   # title only
+        slide.shapes.title.text = "Überschrift"
+        slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,
+                               Inches(4), Inches(6), Inches(6), Inches(5))
+
+    scans, _, _ = scan_pptx(_deck_with(build))
+    groups = [c for c in scans[0].candidates if c.cls == "shape_group"]
+    assert len(groups) == 1
+    # The box starts at the drawn shape, not at the title above it.
+    assert emu_to_pt(groups[0].rect.t) > emu_to_pt(Inches(5))
+
+
+def test_a_slide_without_primitives_yields_nothing():
+    def build(prs):
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = "Nur Text"
+        slide.placeholders[1].text_frame.text = "a\nb\nc"
+
+    scans, _, _ = scan_pptx(_deck_with(build))
+    assert [c for c in scans[0].candidates if c.cls == "shape_group"] == []
