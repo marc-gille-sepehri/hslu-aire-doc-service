@@ -379,8 +379,8 @@ The existing keys are untouched. `cells` is **added**:
   "filename": "objektliste.xlsx",
   "excel": {
     "markdown":   "...",              // unchanged
-    "serialized": [ ... ],            // unchanged, DEPRECATED — see §9.1
     "analysis":   [ ... ],            // unchanged
+    // `serialized` stood here while both formats shipped; removed (§14, decision 1)
     "cells": {                        // NEW, present iff resolved format includes cells
       "text": "# Sheet: Q3\nR1| ...", // the complete serialization, all sheets
       "sheets": [ { "name": "Q3", "text": "R1| ...", "rows": 6, "cells": 19 } ],
@@ -447,6 +447,10 @@ defaults, or authoring clients will keep omitting both fields (§2).
 alongside, mark `serialized` deprecated in the README, and remove it only after confirming no
 consumer reads it.
 
+> **Since done.** The consumer audit found only the wizard; it was migrated to `excel.cells` and
+> deployed, and `serialize_excel` was then deleted rather than changed — which is what this
+> paragraph was protecting against. See §14, decision 1.
+
 ### 9.2 openpyxl constraints this imposes
 
 - `read_only=True` gives no merged ranges at all — `ReadOnlyWorksheet` has no `merged_cells`
@@ -470,7 +474,7 @@ consumer reads it.
 - `requirements.txt` — no new dependency. `zipfile`/`xml.etree` are stdlib; `xlrd` is not needed
   because `.xls` is out of scope (D3).
 - App Runner autoscaling configuration — `MaxConcurrency` (D2, §12.4). Infrastructure, not code.
-- `README.md` — API section, deprecation note on `serialized`.
+- `README.md` — API section; the deprecation note on `serialized` has since become a removal note.
 - `tests/test_cells.py`, `tests/make_fixtures.py`, `tests/fixtures/objektliste.xlsx` — 25 tests
   covering §6, escaping, value formatting, errors, multi-sheet, CSV, applicability and the
   §6.2 round trip. All passing.
@@ -652,11 +656,13 @@ and memory at the same time.
 
 ## 14. Open decisions
 
-1. **`serialized` removal.** — **audit done.** `hslu-aire-server` reads nothing; it is a pure
-   pass-through proxy (`res.json(data)`, `src/index.ts`). The only consumer was the **wizard**
-   (`convertApi.ts`, `DocConvert.tsx`, `labels.ts`), which has now been migrated to
-   `excel.cells`. `serialized` can be deleted from the doc service **once the wizard change is
-   deployed** — not before, or the running frontend loses its middle tab.
+1. ~~**`serialized` removal.**~~ — **resolved, removed.** The audit held: `hslu-aire-server` is a
+   pass-through proxy and read nothing; the only consumer was the wizard, which was migrated to
+   `excel.cells` and deployed first. `serialize_excel` and the `excel.serialized` field are gone
+   from the doc service, and the response is now `{ filename, markdown, analysis }` plus `cells`
+   when asked for. Two serializations of one spreadsheet meant every reader had to know which was
+   authoritative — and the weaker one, with 0-based indices, no merge handling and no escaping,
+   was the one that looked simpler.
 2. ~~**`.xls` in the first cut.**~~ — **resolved, D3: out of scope.** `.xls` is treated as
    non-tabular for `cells`; its Markdown path is unchanged.
 3. ~~**Row limit vs. instance size**~~ — **resolved.** Measured (§12.2): merges come from a

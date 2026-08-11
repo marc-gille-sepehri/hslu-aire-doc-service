@@ -48,9 +48,9 @@ It is called **server-to-server** by `hslu-aire-server` and is **not exposed pub
 
   Format and rationale: [`docs/delta-spec-doc-convert-cells.md`](docs/delta-spec-doc-convert-cells.md).
 
-  > `excel.serialized` is the **older** row-wise format (0-based numeric row/column indices) and
-  > is deprecated in favour of `excel.cells`. It is still emitted; remove only after auditing
-  > consumers in `hslu-aire-server`.
+  > **Removed:** `excel.serialized`, an older row-wise format with 0-based indices, no merge
+  > handling and no escaping. Superseded by `excel.cells`. The Excel response is now
+  > `{ filename, markdown, analysis }`, plus `cells` when requested.
 
 ## Config (env)
 

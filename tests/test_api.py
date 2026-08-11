@@ -22,11 +22,14 @@ def post(**data):
     )
 
 
-def test_default_response_is_unchanged():
-    """Absent outputFormat must behave exactly as before — no extra keys."""
+def test_default_response_carries_no_cells():
+    """Absent outputFormat, the response is markdown plus analysis and nothing
+    else. `serialized` used to sit here too — a second, weaker serialization
+    beside `cells` (delta spec §14, decision 1) — and is gone now that the
+    wizard reads `cells`."""
     body = post().json()
     assert body["kind"] == "excel"
-    assert set(body["excel"]) == {"filename", "markdown", "serialized", "analysis"}
+    assert set(body["excel"]) == {"filename", "markdown", "analysis"}
 
 
 def test_cells_added_when_requested():

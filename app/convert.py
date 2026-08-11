@@ -49,33 +49,6 @@ def _jsonable(obj: Any) -> Any:
     return str(obj)
 
 
-def serialize_excel(data: bytes) -> list[dict]:
-    """Row-wise table serialization (the tri-server 'descriptive' format that beats
-    Markdown for tabular extraction): one line per row,
-        R{row}| {col}:{value} || {col}:{value} || ...
-    with 0-based row/col indices, empty cells omitted, raw values, error states
-    (#VALUE! …) preserved verbatim, in-cell newlines as a literal \\n."""
-    from openpyxl import load_workbook
-
-    wb = load_workbook(io.BytesIO(data), data_only=True, read_only=True)
-    sheets = []
-    for ws in wb.worksheets:
-        lines = []
-        for r, row in enumerate(ws.iter_rows()):
-            parts = []
-            for cell in row:
-                v = cell.value
-                if v is None or v == "":
-                    continue
-                col = cell.column - 1  # 0-based
-                sval = str(v).replace("\r\n", "\n").replace("\n", "\\n")
-                parts.append(f"{col}:{sval}")
-            if parts:
-                lines.append(f"R{r}| " + " || ".join(parts))
-        sheets.append({"name": ws.title, "serialized": "\n".join(lines)})
-    return sheets
-
-
 def analyze_excel_stats(data: bytes) -> list[dict]:
     """Per-sheet, per-column dtype/null/unique + numeric stats or top categories +
     a small sample. A compact statistical description on top of the raw formats."""
@@ -124,12 +97,17 @@ def excel_markdown(data: bytes) -> str:
 
 
 def convert_excel(data: bytes, filename: str) -> dict:
-    """Spreadsheet → both a Markdown rendering AND the descriptive row-wise
-    serialization, plus a compact statistical analysis."""
+    """Spreadsheet → a Markdown rendering plus a compact statistical analysis.
+
+    The cell-addressed serialization lives in `cells.py` and is attached by the
+    route. An earlier `serialized` field carried a weaker version of the same
+    idea — 0-based indices, no merge handling, no escaping — and was removed once
+    the only consumer had migrated (delta spec §14, decision 1). Two formats for
+    one thing meant every reader had to know which one was authoritative.
+    """
     return {
         "filename": filename,
         "markdown": excel_markdown(data),
-        "serialized": serialize_excel(data),
         "analysis": analyze_excel_stats(data),
     }
 
