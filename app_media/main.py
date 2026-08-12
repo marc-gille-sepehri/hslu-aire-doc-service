@@ -13,7 +13,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from fastapi import Body, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 
 from . import libreoffice, source_cache, storage
 from .pdf_scan import scan_pdf
@@ -290,10 +290,18 @@ async def render(
 
 
 @app.post("/v1/media/cleanup")
-async def cleanup(payload: dict = Body(...), authorization: str = Header(default="")):
-    """Remove `media/work/<jobId>/`. Blobs are never deleted (§1, §6)."""
+async def cleanup(jobId: str = Form(...), authorization: str = Header(default="")):
+    """Remove `media/work/<jobId>/`. Blobs are never deleted (§1, §6).
+
+    A form field, like every other endpoint on this service. It used to take a
+    JSON body while the portal sent multipart, so every call answered 422 and no
+    job ever cleaned up after itself. Silently: the caller treats cleanup as
+    best-effort and only warns, which is the right call for a few stale megabytes
+    and the reason nobody noticed 459 MB of them.
+
+    Mixing `Form` and `Body` on one endpoint is not an option — FastAPI parses a
+    request body one way or the other — and matching the caller matters more than
+    keeping the JSON shape nothing was using.
+    """
     _auth(authorization)
-    job_id = payload.get("jobId")
-    if not job_id:
-        raise HTTPException(status_code=400, detail="jobId required")
-    return {"removed": storage.delete_prefix(storage.work_key(job_id, ""))}
+    return {"removed": storage.delete_prefix(storage.work_key(jobId, ""))}

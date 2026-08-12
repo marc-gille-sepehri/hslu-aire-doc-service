@@ -690,3 +690,37 @@ def test_source_cache_evicts_beyond_the_entry_limit(monkeypatch, tmp_path):
 
     kept = [p for p in cache.CACHE_DIR.iterdir() if p.suffix != ".sha256"]
     assert len(kept) == 2
+
+
+# ── §6 cleanup ──────────────────────────────────────────────────────────────
+
+def test_cleanup_accepts_what_the_portal_actually_sends(monkeypatch):
+    """Regression: the endpoint took a JSON body, the portal sends multipart.
+
+    Every call answered 422, so `media/work/<jobId>/` was never emptied and the
+    prepared PDFs piled up — 459 MB before anyone read a log line. It went
+    unnoticed because the caller treats cleanup as best-effort and only warns,
+    which is right for a few stale megabytes and useless as an alarm.
+    """
+    from fastapi.testclient import TestClient
+
+    from app_media import main, storage
+
+    removed: list[str] = []
+    monkeypatch.setattr(storage, "delete_prefix", lambda prefix: removed.append(prefix) or 3)
+    monkeypatch.setattr(main, "SERVICE_TOKEN", "")
+
+    client = TestClient(main.app)
+    res = client.post("/v1/media/cleanup", data={"jobId": "job_abc"})
+
+    assert res.status_code == 200, res.text
+    assert res.json() == {"removed": 3}
+    assert removed == ["media/work/job_abc/"]
+
+
+def test_cleanup_without_a_job_id_is_rejected():
+    from fastapi.testclient import TestClient
+
+    from app_media import main
+
+    assert TestClient(main.app).post("/v1/media/cleanup", data={}).status_code == 422
